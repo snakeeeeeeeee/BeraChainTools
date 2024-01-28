@@ -20,6 +20,10 @@ from config.address_config import bex_swap_address, usdc_address, honey_address,
     bex_approve_liquidity_address, weth_address, bend_address, bend_borrows_address, wbear_address, zero_address, \
     ooga_booga_address
 
+from loguru import logger
+
+from script.proxy_manager import ProxyPoolManager
+
 
 class BeraChainTools(object):
     def __init__(self, private_key, client_key='', solver_provider='', rpc_url='https://artio.rpc.berachain.com/'):
@@ -41,6 +45,8 @@ class BeraChainTools(object):
         self.bend_contract = self.w3.eth.contract(address=bend_address, abi=bend_abi)
         self.bend_borrows_contract = self.w3.eth.contract(address=bend_borrows_address, abi=bend_borrows_abi)
         self.ooga_booga_contract = self.w3.eth.contract(address=ooga_booga_address, abi=ooga_booga_abi)
+        self.nonce = None
+        self.proxy_pool = ProxyPoolManager()
 
     def get_2captcha_google_token(self) -> Union[bool, str]:
         if self.client_key == '':
@@ -107,7 +113,13 @@ class BeraChainTools(object):
         return False
 
     def get_nonce(self):
-        return self.w3.eth.get_transaction_count(self.account.address)
+        if self.nonce is None:
+            self.nonce = self.w3.eth.get_transaction_count(self.account.address)
+            print(f"> initial nonce: {self.nonce}")
+        else:
+            self.nonce += 1
+            print(f"> incremented nonce: {self.nonce}")
+        return self.nonce
 
     def get_solver_provider(self):
         provider_dict = {
@@ -151,15 +163,19 @@ class BeraChainTools(object):
         :return: hash
         """
         approve_contract = self.w3.eth.contract(address=approve_token_address, abi=erc_20_abi)
-        txn = approve_contract.functions.approve(spender, amount).build_transaction(
-            {'gas': 500000 + random.randint(1, 10000), 'gasPrice': int(self.w3.eth.gas_price * 1.15),
-             'nonce': self.get_nonce()})
+        tx_data = {
+            'gas': 500000 + random.randint(1, 10000),
+            'gasPrice': int(self.w3.eth.gas_price * 1.15),
+            'nonce': self.get_nonce()
+        }
+
+        txn = approve_contract.functions.approve(spender, amount).build_transaction(tx_data)
         signed_txn = self.w3.eth.account.sign_transaction(txn, private_key=self.private_key)
         order_hash = self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
         return order_hash.hex()
 
     def bex_swap(self, amount_in: int, asset_in_address: Union[Address, ChecksumAddress],
-                 asset_out_address: Union[Address, ChecksumAddress]) -> str:
+                 asset_out_address: Union[Address, ChecksumAddress], trak_id: str = None) -> str:
         """
         bex 交换
         :param amount_in: 输入数量
@@ -190,9 +206,12 @@ class BeraChainTools(object):
         params = {'quoteAsset': asset_out_address, 'baseAsset': asset_in_address, 'amount': amount_in,
                   'swap_type': 'given_in'}
 
-        response = self.session.get('https://artio-80085-dex-router.berachain.com/dex/route', params=params,
-                                    headers=headers)
-        assert response.status_code == 200
+        # response = self.session.get('https://artio-80085-dex-router.berachain.com/dex/route', params=params,
+        #                             headers=headers)
+        response = self.proxy_pool.get(url='https://artio-80085-dex-router.berachain.com/dex/route', trak_id=trak_id,
+                                       params=params,
+                                       headers=headers)
+        assert response.ok
         swaps_list = response.json()['steps']
         swaps = list()
         for index, info in enumerate(swaps_list):
@@ -210,7 +229,7 @@ class BeraChainTools(object):
             {'gas': 500000 + random.randint(1, 10000), 'value': amount_in if asset_in_address == wbear_address else 0,
              'gasPrice': int(self.w3.eth.gas_price * 1.2), 'nonce': self.get_nonce()})
         signed_txn = self.w3.eth.account.sign_transaction(txn, private_key=self.private_key)
-        order_hash = self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
+        order_hash = self.send_tx(signed_txn)  # self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
         return order_hash.hex()
 
     def bex_add_liquidity(self, amount_in: int, pool_address: Union[Address], asset_in_address: Union[Address]) -> str:
@@ -236,7 +255,7 @@ class BeraChainTools(object):
             {'gas': 500000 + random.randint(1, 10000), 'gasPrice': int(self.w3.eth.gas_price * 1.15),
              'nonce': self.get_nonce()})
         signed_txn = self.w3.eth.account.sign_transaction(txn, private_key=self.private_key)
-        order_hash = self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
+        order_hash = self.send_tx(signed_txn)  # self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
         return order_hash.hex()
 
     def honey_mint(self, amount_usdc_in: int) -> str:
@@ -257,7 +276,7 @@ class BeraChainTools(object):
             {'gas': 500000 + random.randint(1, 10000), 'gasPrice': int(self.w3.eth.gas_price * 1.15),
              'nonce': self.get_nonce()})
         signed_txn = self.w3.eth.account.sign_transaction(txn, private_key=self.private_key)
-        order_hash = self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
+        order_hash = self.send_tx(signed_txn)  # self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
         return order_hash.hex()
 
     def honey_redeem(self, amount_honey_in: int) -> str:
@@ -279,7 +298,7 @@ class BeraChainTools(object):
             {'gas': 500000 + random.randint(1, 10000), 'gasPrice': int(self.w3.eth.gas_price * 1.15),
              'nonce': self.get_nonce()})
         signed_txn = self.w3.eth.account.sign_transaction(txn, private_key=self.private_key)
-        order_hash = self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
+        order_hash = self.send_tx(signed_txn)  # self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
         return order_hash.hex()
 
     def bend_deposit(self, amount_in: int, amount_in_token_address: Union[Address]) -> str:
@@ -303,7 +322,7 @@ class BeraChainTools(object):
             {'gas': 500000 + random.randint(1, 10000), 'gasPrice': int(self.w3.eth.gas_price * 1.15),
              'nonce': self.get_nonce()})
         signed_txn = self.w3.eth.account.sign_transaction(txn, private_key=self.private_key)
-        order_hash = self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
+        order_hash = self.send_tx(signed_txn)  # self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
         return order_hash.hex()
 
     def bend_borrow(self, amount_out: int, asset_token_address: Union[Address]) -> str:
@@ -319,7 +338,7 @@ class BeraChainTools(object):
             {'gas': 500000 + random.randint(1, 10000), 'gasPrice': int(self.w3.eth.gas_price * 1.15),
              'nonce': self.get_nonce()})
         signed_txn = self.w3.eth.account.sign_transaction(txn, private_key=self.private_key)
-        order_hash = self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
+        order_hash = self.send_tx(signed_txn)  # self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
         return order_hash.hex()
 
     def bend_repay(self, repay_amount: int, asset_token_address: Union[Address]) -> str:
@@ -339,7 +358,7 @@ class BeraChainTools(object):
             {'gas': 500000 + random.randint(1, 10000), 'gasPrice': int(self.w3.eth.gas_price * 1.15),
              'nonce': self.get_nonce()})
         signed_txn = self.w3.eth.account.sign_transaction(txn, private_key=self.private_key)
-        order_hash = self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
+        order_hash = self.send_tx(signed_txn)  # self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
         return order_hash.hex()
 
     def honey_jar_mint(self):
@@ -360,7 +379,7 @@ class BeraChainTools(object):
                 data='0xa6f2ae3a',
             ),
             self.account.key)
-        order_hash = self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
+        order_hash = self.send_tx(signed_txn)  # self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
         return order_hash.hex()
 
     def deploy_contract(self, contract_source_code, solc_version):
@@ -387,3 +406,26 @@ class BeraChainTools(object):
         signed_txn = self.w3.eth.account.sign_transaction(txn, private_key=self.private_key)
         order_hash = self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
         return order_hash.hex()
+
+    def send_tx(self, signed_tx):
+        # 发送交易
+        tx_hash = self.w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        receipt = None
+        max_polling_attempts = 10
+        delay_between_attempts = 3
+        for attempt in range(max_polling_attempts):
+            try:
+                # 尝试获取交易收据
+                time.sleep(delay_between_attempts)
+                receipt = self.w3.eth.get_transaction_receipt(tx_hash)
+                if receipt:
+                    # 如果收据存在，则打印信息并退出循环
+                    logger.debug(f"transaction receipt found in attempt {attempt + 1}")
+                    break
+            except Exception as e:
+                # 如果发生异常，则打印错误消息
+                logger.debug(f"attempt {attempt + 1} failed: {e}")
+            # 如果没有找到收据，则等待指定的延迟时间
+            logger.error(f"waiting for {delay_between_attempts} seconds before next attempt...")
+            time.sleep(delay_between_attempts)
+        return receipt.transactionHash
